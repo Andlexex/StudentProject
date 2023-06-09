@@ -140,6 +140,12 @@ class GINModel(nn.Module):
 
     def forward(self, x, edge_index):
         x = self.conv1(x, edge_index)
+        x = torch.relu(x)
+        x = self.conv2(x, edge_index)
+        return x
+        
+        '''
+        x = self.conv1(x, edge_index)
         x = self.conv2(x, edge_index)
         batch = utils.to_dense_batch(edge_index)[0]
 
@@ -147,7 +153,7 @@ class GINModel(nn.Module):
         x = global_add_pool(x, batch)
         x = global_add_pool(x, edge_index)
         return x
-        '''
+        
         x = self.conv1(x, edge_index)
         x = F.relu(x)
         x = self.conv2(x, edge_index)
