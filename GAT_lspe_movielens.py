@@ -28,6 +28,9 @@ import numpy as np
 from scipy.sparse import csr_matrix
 
 
+'''
+Diese Funktion berechnet die Positional Encodings, sie ist zu finden in GENERIC_initPositionalEncodings.py
+'''
 
 def calculatePosEncodings(edge_index, num_nodes):
     edge_index = edge_index.t().tolist()
@@ -65,6 +68,60 @@ def calculatePosEncodings(edge_index, num_nodes):
     pos_enc_dim = 1
     RESULT_POS_ENCODING = torch.from_numpy(EigVec[:,1:pos_enc_dim+1]).float() 
     return RESULT_POS_ENCODING
+
+
+
+def calculateLoss(task_loss, batch, num_nodes, positional_encoding):
+    #HYPERPARAMETERS
+    device = "cpu"
+    pos_enc_dim = 1
+    alpha_loss: 1e-3
+    lambda_loss: 1  # ist auch 100
+
+    #edge_index im korrekten Format definieren
+    edge_index = batch.edge_index.t().tolist()
+    edge_index = [(src, dst) for src, dst in edge_index]
+
+    # Loss A: Task loss -------------------------------------------------------------
+    loss_a = task_loss
+    # Loss B: Laplacian Eigenvector Loss --------------------------------------------
+    n = num_nodes
+
+    # Laplacian 
+    rows, cols = zip(*edge_index)
+    data = np.ones(len(rows))
+    A = csr_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes))
+
+    ''' this code computes the in_degrees matrix from the edge list. it can later be adapted to compute the in-degrees matrix from the adjacency matrix (however, then, we should
+    do some tests with small sample graphs to ensure everything is correct'''
+
+    in_degrees_dict = {node: 0 for node in range(num_nodes)}
+    # Calculate the in-degrees for each node
+    for edge in edge_index:
+        _, dst = edge
+        in_degrees_dict[dst] += 1
+
+    in_degrees = np.array([in_degrees_dict[i] for i in range(len(in_degrees_dict))], dtype=float)
+    in_degrees = in_degrees.clip(1)  # Clip to ensure no division by zero
+    in_degrees = np.power(in_degrees, -0.5)  # Take the element-wise inverse square root
+
+    # Create the sparse diagonal matrix N
+    N = sp.diags(in_degrees, dtype=float)
+    L = sp.eye(num_nodes) - N * A * N
+
+    p = positional_encoding
+    pT = torch.transpose(p, 1, 0)
+    loss_b_1 = torch.trace(torch.mm(torch.mm(pT, torch.Tensor(L.todense()).to(device)), p))
+
+    '''  TODO: loss_b_2 '''
+
+    loss_b = loss_b_1
+    #self.alpha-loss ist ein hyperparameter!
+    loss = loss_a + 1e-3 * loss_b
+    return loss
+
+
+
 
 
 def precision(predictions, targets, threshold):
@@ -129,7 +186,6 @@ edge_index = torch.tensor([user_index_col, movie_index_col], dtype=torch.long)
 # Set the number of nodes (users and movies)
 num_nodes = len(user_to_index) + len(movie_to_index)
 
-#####TOOOOOOOOODDDDDDDDDDDDDDDDOOOOOOOOOOOOOOOOOOOOOOOOOOO
 positional_encodings = calculatePosEncodings(edge_index, num_nodes)
 
 # Create the data object for the entire dataset. IMPORTANT: this is not according to the documentation, because y are edge features here! 
@@ -198,7 +254,10 @@ class GATModel(nn.Module):
         return x
 
 ''' später: einfach edge features anstatt x!
-WICHTIG: x sind edge features!!!'''
+WICHTIG: x sind edge features!!!
+Die Idee ist einfach mehrmals die forward function für unterschiedliche Sachen aufzurufen (einmal x, einmal positional embeddings und dann später noch node kombiniert mit positional 
+features! )
+'''
 class LSPEGAT(nn.Module):
     def __init__(self, num_features, hidden_channels, num_classes, heads):
         super(LSPEGAT, self).__init__()
@@ -211,8 +270,9 @@ class LSPEGAT(nn.Module):
         x = F.relu(x)
         x = self.gat.conv4(x, edge_index)
 
-        print(pos_embeddings.shape)
         pos_embeddings_init = pos_embeddings.view(-1, pos_embeddings.size(2))
+        torch.set_printoptions(threshold=torch.inf)
+
         pos_embeddings = self.gat.conv1(pos_embeddings_init, edge_index)
         pos_embeddings = F.relu(pos_embeddings)
         pos_embeddings  = self.gat.conv4(pos_embeddings, edge_index)
@@ -231,14 +291,14 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 #hidden channels und epochs tunen
 hidden_channels=8 #8 und 16
 lr = 0.01  #0.01 vs 0.001 
-epochs = 100  #100 vs 200
+epochs =   100  #100 vs 200
 batch_size = 64
 
  #1, 16, 32 ,64, 128, 256, 512
 
 #Early Stopping
 patience = 15  # Number of epochs to wait for improvement
-min_delta = 0.001  # Minimum improvement required to consider as improvement
+min_delta = 0.01  # Minimum improvement required to consider as improvement
 
 best_val_loss = np.inf
 best_epoch = 0
@@ -277,7 +337,10 @@ for epoch in range(epochs):
     for batch in train_loader:
         batch = batch.to(device)
         out, out_pos_embeddings = model(batch.y.unsqueeze(1), batch.edge_index, batch.positional_encodings.unsqueeze(1))
-        loss = criterion(out, batch.y)
+        task_loss = criterion(out, batch.y)
+        loss = calculateLoss(task_loss, batch, num_nodes, out_pos_embeddings)
+
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -295,7 +358,9 @@ for epoch in range(epochs):
     for batch in val_loader:
         batch = batch.to(device)
         out, out_pos_embeddings = model(batch.y.unsqueeze(1), batch.edge_index, batch.positional_encodings.unsqueeze(1))
-        loss = criterion(out, batch.y)
+        task_loss = criterion(out, batch.y)
+        loss = calculateLoss(task_loss, batch, num_nodes, out_pos_embeddings)
+
         val_loss += loss.item() * batch.num_graphs
 
     # Calculate average validation loss
@@ -331,7 +396,10 @@ with torch.no_grad():
     for batch in test_loader:
         batch = batch.to(device)
         out, out_pos_embeddings = model(batch.y.unsqueeze(1), batch.edge_index, batch.positional_encodings.unsqueeze(1))
-        test_loss = criterion(out, batch.y)
+        task_test_loss = criterion(out, batch.y)
+        test_loss = calculateLoss(task_test_loss, batch, num_nodes, out_pos_embeddings)
+
+
         print(f'Test Loss: {test_loss.item()}')
         predictions.extend(out.cpu().numpy().flatten())
         targets.extend(batch.y.cpu().numpy().flatten())
