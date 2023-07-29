@@ -16,16 +16,139 @@ from torch_geometric.nn import GCNConv
 from torch_geometric.nn import GATv2Conv
 from torch_geometric.nn import GINConv
 from sklearn.model_selection import train_test_split
+import torch_geometric as tg
+import numpy as np
+from scipy.sparse import csr_matrix
+from scipy import sparse as sp
+import numpy as np
+import networkx as nx
+
+
+def calculatePosEncodings(edge_index, num_nodes):
+    edge_index = edge_index.t().tolist()
+    edges = [(src, dst) for src, dst in edge_index]
+
+# Create the adjacency matrix in CSR format -> das wird dann für die encodings benutzt!
+    rows, cols = zip(*edges)
+    data = np.ones(len(rows))
+    A = csr_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes))
+
+    ''' this code computes the in_degrees matrix from the edge list. it can later be adapted to compute the in-degrees matrix from the adjacency matrix (however, then, we should
+    do some tests with small sample graphs to ensure everything is correct
+    '''
+    in_degrees_dict = {node: 0 for node in range(num_nodes)}
+    # Calculate the in-degrees for each node
+    for edge in edges:
+        _, dst = edge
+        in_degrees_dict[dst] += 1
+
+    in_degrees = np.array([in_degrees_dict[i] for i in range(len(in_degrees_dict))], dtype=float)
+    in_degrees = in_degrees.clip(1)  # Clip to ensure no division by zero
+    in_degrees = np.power(in_degrees, -0.5)  # Take the element-wise inverse square root
+
+    # Create the sparse diagonal matrix N
+    N = sp.diags(in_degrees, dtype=float)
+
+    L = sp.eye(num_nodes) - N * A * N
+
+    #calc eigvals and eigVecs, equivalent to the original code
+    EigVal, EigVec = np.linalg.eig(L.toarray())
+    idx = EigVal.argsort() # increasing order
+    EigVal, EigVec = EigVal[idx], np.real(EigVec[:,idx])
+
+    #pos_enc_dim = hyperparameter!
+    pos_enc_dim = 1
+    RESULT_POS_ENCODING = torch.from_numpy(EigVec[:,1:pos_enc_dim+1]).float() 
+    return RESULT_POS_ENCODING
+
+def calculateLoss(task_loss, batch, num_nodes, positional_encoding):
+    #HYPERPARAMETERS
+    device = "cpu"
+    pos_enc_dim = 1
+    alpha_loss: 1e-3
+    lambda_loss: 100  # ist auch 100
+
+    #edge_index im korrekten Format definieren
+    edge_index = batch.edge_index.t().tolist()
+    edge_index = [(src, dst) for src, dst in edge_index]
+
+    # Loss B: Laplacian Eigenvector Loss --------------------------------------------
+    n = num_nodes
+
+    # Laplacian 
+    rows, cols = zip(*edge_index)
+    data = np.ones(len(rows))
+    A = csr_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes))
+
+    ''' this code computes the in_degrees matrix from the edge list. it can later be adapted to compute the in-degrees matrix from the adjacency matrix (however, then, we should
+    do some tests with small sample graphs to ensure everything is correct'''
+
+    in_degrees_dict = {node: 0 for node in range(num_nodes)}
+    # Calculate the in-degrees for each node
+    for edge in edge_index:
+        _, dst = edge
+        in_degrees_dict[dst] += 1
+
+    in_degrees = np.array([in_degrees_dict[i] for i in range(len(in_degrees_dict))], dtype=float)
+    in_degrees = in_degrees.clip(1)  # Clip to ensure no division by zero
+    in_degrees = np.power(in_degrees, -0.5)  # Take the element-wise inverse square root
+
+    # Create the sparse diagonal matrix N
+    N = sp.diags(in_degrees, dtype=float)
+    L = sp.eye(num_nodes) - N * A * N
+
+    p = positional_encoding
+    pT = torch.transpose(p, 1, 0)
+    loss_b_1 = torch.trace(torch.mm(torch.mm(pT, torch.Tensor(L.todense()).to(device)), p))
+
+    '''  TODO: loss_b_2 '''
+
+    loss_b = loss_b_1
+
+    loss = task_loss + 1e-3 * loss_b
+    return loss
+
+
+def precision(predictions, targets, threshold):
+    # Apply a threshold to the predictions
+    binary_predictions = (predictions >= threshold).astype(int)
+    binary_targets = (targets >= threshold).astype(int)
+
+    # Calculate the true positive (TP) and false positive (FP) counts
+    TP = np.sum((binary_predictions == 1) & (binary_targets == 1))
+    FP = np.sum((binary_predictions == 1) & (binary_targets == 0))
+
+    print("Negative: ")
+    print(np.sum(binary_targets == 1))
+    print("Positive: ")
+    print(np.sum(binary_targets == 0))
+    # Calculate precision
+    precision_value = TP / (TP + FP)
+    return precision_value
+
+def recall(predictions, targets, threshold):
+    # Apply a threshold to the predictions
+    binary_predictions = (predictions >= threshold).astype(int)
+    binary_targets = (targets >= threshold).astype(int)
+    # Calculate the true positive (TP) and false negative (FN) counts
+    TP = np.sum((binary_predictions == 1) & (binary_targets == 1))
+    FN = np.sum((binary_predictions == 0) & (binary_targets == 1))
+    # Calculate recall
+    recall_value = TP / (TP + FN)
+    return recall_value
+
 
 # Step 1: Load the MovieLens dataset manually
 data_path = 'u.data'  # Set the path to the dataset file
 df = pd.read_csv(data_path, delimiter='\t')
+#print(df)
 
 # Step 2: Preprocess the dataset
 # Extract the user, movie, and rating columns
 user_col = df['user_id'].values
 movie_col = df['item_id'].values
 rating_col = df['rating'].values
+
 
 # Create a dictionary to map unique user and movie IDs to continuous indices
 #user_id -> index  (where index is continously numerated!) and movie_id -> index
@@ -49,9 +172,15 @@ edge_index = torch.tensor([user_index_col, movie_index_col], dtype=torch.long)
 # Set the number of nodes (users and movies)
 num_nodes = len(user_to_index) + len(movie_to_index)
 
-# Create the data object for the entire dataset
-data = Data(edge_index=edge_index, y=rating_tensor, num_nodes=num_nodes)
-print(data)
+#####TOOOOOOOOODDDDDDDDDDDDDDDDOOOOOOOOOOOOOOOOOOOOOOOOOOO
+positional_encodings = calculatePosEncodings(edge_index, num_nodes)
+
+# Create the data object for the entire dataset. IMPORTANT: this is not according to the documentation, because y are edge features here! 
+data = Data(edge_index=edge_index, y=rating_tensor, num_nodes=num_nodes, positional_encodings = positional_encodings)
+
+
+
+
 
 
 # Step 4: Split the data into training and test sets
@@ -73,18 +202,21 @@ val_data = data.__class__()
 #soweit ich es verstehe, sind alle 2.500 nodes im training und testset vorhanden. gesplittet werden nur die edges, d.h. 
 #es ist nur ein subset der 100.000 edges im training set sowie im test set vorhanden
 # also 10% der Bewertungen 
-
 train_data.edge_index = data.edge_index[:, train_indices]
 train_data.y = data.y[train_indices]
 train_data.num_nodes = data.num_nodes
+train_data.positional_encodings = data.positional_encodings
 
 test_data.edge_index = data.edge_index[:, test_indices]
 test_data.y = data.y[test_indices]
 test_data.num_nodes = data.num_nodes
+test_data.positional_encodings = data.positional_encodings
 
 val_data.edge_index = data.edge_index[:, val_indices]
 val_data.y = data.y[val_indices]
 val_data.num_nodes = data.num_nodes
+val_data.positional_encodings = data.positional_encodings
+
 
 '''
 Step 5: Define the Graph Convolutional Network (GCN) model. Hier könnte man dann die zusätzlichen Dinge einbauen
@@ -97,36 +229,9 @@ Actually ist der Loss ohne RELU sogar kleiner!
 
 '''
 
-class GCN(nn.Module):
-    def __init__(self, num_features, hidden_channels, num_classes):
-        super(GCN, self).__init__()
-        #first graph convolution
-        self.conv1 = GCNConv(num_features, hidden_channels)
-        #second graph convolution
-        self.conv2 = GCNConv(hidden_channels, num_classes)
 
-    def forward(self, x, edge_index):
-        x = self.conv1(x, edge_index)
-        x = F.relu(x)
-        x = self.conv2(x, edge_index)
-        return x
 
-class GATModel(nn.Module):
-    def __init__(self, num_features, hidden_channels, num_classes, heads):
-        super(GATModel, self).__init__()
-        self.conv1 = GATv2Conv(num_features, hidden_channels, heads)
-        self.conv4 = GATv2Conv(hidden_channels, num_classes, heads)
-        
-    def forward(self, x, edge_index):
-        x = self.conv1(x, edge_index)
-        x = F.relu(x)
-       # x = self.conv2(x, edge_index)
-       # x = F.relu(x)
-       # x = self.conv3(x, edge_index)
-       # x = F.relu(x)
-        x = self.conv4(x, edge_index)
-        return x
-    
+
 class GINModel(nn.Module):
     def __init__(self, num_features, num_classes):
         super(GINModel, self).__init__()
@@ -147,6 +252,30 @@ class GINModel(nn.Module):
         x = torch.relu(x)
         x = self.conv2(x, edge_index)
         return x
+    
+''' später: einfach edge features anstatt x!
+WICHTIG: x sind edge features!!!'''
+class LSPEGIN(nn.Module):
+    def __init__(self, num_features, num_classes):
+        super(LSPEGIN, self).__init__()
+        self.gin = GINModel(num_features, num_classes)
+
+
+    def forward(self, x, edge_index, pos_embeddings):
+
+        #edge features: concatenate node features and edge features (TODO when adding node features)
+        x = self.gin.conv1(x, edge_index)
+        x = torch.relu(x)
+        x = self.gin.conv2(x, edge_index)
+
+        
+        pos_embeddings_init = pos_embeddings.view(-1, pos_embeddings.size(2))
+        pos_embeddings = self.gin.conv1(pos_embeddings_init, edge_index)
+        pos_embeddings = F.relu(pos_embeddings)
+        pos_embeddings  = self.gin.conv2(pos_embeddings, edge_index)
+        
+        return x, pos_embeddings
+
 # Step 6: Train and evaluate the GCN model
 # Set seed for reproducibility
 torch.manual_seed(42)
@@ -173,9 +302,9 @@ early_stop_counter = 0
 
 # Define the GCNModel
 #model = GATModel(num_features = 1, hidden_channels = hidden_channels, num_classes = 1, heads = 1).to(device)
-#model = GINModel(num_features = 1, num_classes = 1).to(device)
+model = LSPEGIN(num_features = 1, num_classes = 1)
 
-model = GCN(num_features=1, hidden_channels=hidden_channels, num_classes=1).to(device)
+#model = GCN(num_features=1, hidden_channels=hidden_channels, num_classes=1).to(device)
 #------------------------------------------------------
 #loss function, and optimizer, MSE = Metrik für Loss 
 criterion = nn.MSELoss()
@@ -200,8 +329,9 @@ for epoch in range(epochs):
     
     for batch in train_loader:
         batch = batch.to(device)
-        out = model(batch.y.unsqueeze(1), batch.edge_index)
-        loss = criterion(out, batch.y)
+        out, out_pos_embeddings = model(batch.y.unsqueeze(1), batch.edge_index, batch.positional_encodings.unsqueeze(1))
+        task_loss = criterion(out, batch.y)
+        loss = calculateLoss(task_loss, batch, num_nodes, out_pos_embeddings)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -216,8 +346,9 @@ for epoch in range(epochs):
     val_loss = 0.0
     for batch in val_loader:
         batch = batch.to(device)
-        out = model(batch.y.unsqueeze(1), batch.edge_index)
-        loss = criterion(out, batch.y)
+        out, out_pos_embeddings = model(batch.y.unsqueeze(1), batch.edge_index, batch.positional_encodings.unsqueeze(1))
+        task_loss = criterion(out, batch.y)
+        loss = calculateLoss(task_loss, batch, num_nodes, out_pos_embeddings)
         val_loss += loss.item() * batch.num_graphs
 
     # Calculate average validation loss
@@ -261,8 +392,9 @@ with torch.no_grad():
 
     for batch in test_loader:
         batch = batch.to(device)
-        out = model(batch.y.unsqueeze(1), batch.edge_index)
-        test_loss = criterion(out, batch.y)
+        out, out_pos_embeddings = model(batch.y.unsqueeze(1), batch.edge_index, batch.positional_encodings.unsqueeze(1))
+        task_test_loss = criterion(out, batch.y)
+        test_loss = calculateLoss(task_test_loss, batch, num_nodes, out_pos_embeddings)
         print(f'Test Loss: {test_loss.item()}')
         predictions.extend(out.cpu().numpy().flatten())
         targets.extend(batch.y.cpu().numpy().flatten())
