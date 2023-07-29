@@ -131,7 +131,7 @@ class GINModel(nn.Module):
     def __init__(self, num_features, num_classes):
         super(GINModel, self).__init__()
         self.conv1 = GINConv(nn.Sequential(
-            nn.Linear(num_features, 1027),
+            nn.Linear(num_features, 256),
             nn.ReLU(),
             nn.Linear(256, 256),
             nn.ReLU()
