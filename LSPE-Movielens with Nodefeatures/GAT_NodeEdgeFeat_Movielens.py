@@ -25,7 +25,6 @@ import networkx as nx
 import sys
 import csv
 
-
 def calculatePosEncodings_rswe(edge_index, num_nodes):
     edge_index = edge_index.t().tolist()
     edges = [(src, dst) for src, dst in edge_index]
@@ -63,12 +62,11 @@ def calculatePosEncodings_rswe(edge_index, num_nodes):
     RESULT_POS_ENCODING = PE 
     return RESULT_POS_ENCODING
 
-
 def calculatePosEncodings(edge_index, num_nodes):
     edge_index = edge_index.t().tolist()
     edges = [(src, dst) for src, dst in edge_index]
 
-# Create the adjacency matrix in CSR format -> das wird dann für die encodings benutzt!
+    # Create the adjacency matrix in CSR format -> das wird dann für die encodings benutzt!
     rows, cols = zip(*edges)
     data = np.ones(len(rows))
     A = csr_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes))
@@ -100,33 +98,6 @@ def calculatePosEncodings(edge_index, num_nodes):
     pos_enc_dim = 5
     RESULT_POS_ENCODING = torch.from_numpy(EigVec[:,1:pos_enc_dim+1]).float() 
     return RESULT_POS_ENCODING
-
-def precission_recall_at_k (predictions, targets, threshold, k):
-    # Combine ratings and predictions into tuples for sorting
-    combined = list(zip(targets, predictions))
-
-    # Sort the combined list in descending order of predictions
-    combined.sort(key=lambda x: x[1], reverse=True)
-
-    # Extract top k sorted items and calculate precision and recall
-    top_k_items = combined[:k]
-    true_positives = sum(1 for rating, _ in top_k_items if rating >= threshold)
-    false_positives = k - true_positives
-    relevant_items = sum(1 for rating in targets if rating >= threshold)
-    false_negatives = relevant_items - true_positives
-
-    precision_at_k = true_positives / (true_positives + false_positives)
-    recall_at_k = true_positives / (true_positives + false_negatives)
-    false_negatives_normalized = 0
-
-    for rating, prediction in top_k_items:
-        if(prediction < 3.5 and rating >=3.5):
-            false_negatives_normalized += 1
-
-    normalized_recall_at_k = true_positives / (true_positives + false_negatives_normalized) #/ min(k, relevant_items)
-
-    return precision_at_k, recall_at_k, normalized_recall_at_k
-
 
 def calculateLoss(task_loss, batch, num_nodes, positional_encoding):
     #HYPERPARAMETERS
@@ -188,13 +159,10 @@ def precision(predictions, targets, threshold):
     FP = np.sum((binary_predictions == 1) & (binary_targets == 0))
 
     print("Negative: ")
-    print(np.sum(binary_predictions == 1))
+    print(np.sum(binary_targets == 1))
     print("Positive: ")
-    print(np.sum(binary_predictions == 0))
+    print(np.sum(binary_targets == 0))
     # Calculate precision
-
-    
-
     precision_value = TP / (TP + FP)
     return precision_value
 
@@ -208,6 +176,30 @@ def recall(predictions, targets, threshold):
     # Calculate recall
     recall_value = TP / (TP + FN)
     return recall_value
+
+def precission_recall_at_k (predictions, targets, threshold, k):
+    # Combine ratings and predictions into tuples for sorting
+    combined = list(zip(targets, predictions))
+
+    # Sort the combined list in descending order of predictions
+    combined.sort(key=lambda x: x[1], reverse=True)
+
+    # Extract top k sorted items and calculate precision and recall
+    top_k_items = combined[:k]
+    true_positives = sum(1 for rating, _ in top_k_items if rating >= threshold)
+    false_positives = k - true_positives
+    relevant_items = sum(1 for rating in targets if rating >= threshold)
+    false_negatives = relevant_items - true_positives
+
+    precision_at_k = true_positives / (true_positives + false_positives)
+    recall_at_k = true_positives / (true_positives + false_negatives)
+    normalized_recall_at_k = recall_at_k / (k / relevant_items)
+
+
+    return precision_at_k, recall_at_k, normalized_recall_at_k
+
+
+
 
 
 # Step 1: Load the MovieLens dataset manually
@@ -228,7 +220,6 @@ rating_col = df['rating'].values
 user_to_index = {user_id: index for index, user_id in enumerate(set(user_col))}
 movie_to_index = {movie_id: index for index, movie_id in enumerate(set(movie_col))}
 
-
 # Map the user and movie columns to their corresponding indices
 # das ist KEIN dictionary mehr, sondern eine Liste  [index_zeile1, index_zeile2, index_zeile3, ..., index_zeile_n]
 user_index_col = [user_to_index[user_id] for user_id in user_col]
@@ -236,6 +227,23 @@ movie_index_col = [movie_to_index[movie_id] for movie_id in movie_col]
 
 # Convert the rating column to a PyTorch tensor
 rating_tensor = torch.tensor(rating_col, dtype=torch.float)
+
+
+# Initial Split: 80% input features (history ratings), 20% target features (prediction ratings)
+total_ratings = len(rating_tensor)
+input_ratio = 0.8
+input_indices = torch.randperm(total_ratings)[:int(total_ratings * input_ratio)]
+target_indices = torch.randperm(total_ratings)[int(total_ratings * input_ratio):]
+
+input_rating_tensor = rating_tensor[input_indices]
+target_rating_tensor = rating_tensor[target_indices]
+
+input_user_index_col = [user_index_col[i] for i in input_indices]
+input_movie_index_col = [movie_index_col[i] for i in input_indices]
+
+target_user_index_col = [user_index_col[i] for i in target_indices]
+target_movie_index_col = [movie_index_col[i] for i in target_indices]
+
 
 # Step 3: Create the graph data
 # Create edge indices for user-movie interactions
@@ -273,28 +281,20 @@ user_genre_features = torch.zeros(num_users, num_genres)
 all_genre_features = torch.cat((movie_genre_features, user_genre_features), dim=0)
 
 # Create the data object for the entire dataset. IMPORTANT: this is not according to the documentation, because y are edge features here! 
-data = Data(edge_index=edge_index,   x=all_genre_features, y=rating_tensor, num_nodes=num_nodes, positional_encodings = positional_encodings)
-
-
-
-
+#the ratings are split into target-ratings (this is what the model will predict) and history ratings /input ratings (these are old ratings, which the model will utilize to predict)
+data = Data(edge_index=edge_index,   x=all_genre_features, y= target_rating_tensor, edge_attr = rating_tensor, num_nodes=num_nodes, positional_encodings = positional_encodings)
 
 # Step 4: Split the data into training and test sets
 indices = list(range(data.edge_index.size(1)))
 
 #das hier klein, damit der Speicher nicht überdreht wird. Aber nicht zu klein, weil sonst kommt es zu problemen!
-'''
-for loop: Each model 10 times. to ensure that the same train-test-split is used, we do a train test split first, then run model 1, 2 and 3
-After that, new train-test split, run model1, 2, 3 
-and so on 
-'''
+#neu: Target indicies
 
-# Now write the data to a CSV file
-csv_filename = "results_GIN.csv"
+
+csv_filename = "GAT_results.csv"
 with open(csv_filename, mode='a', newline='') as csv_file:
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow(["i", "Model", "Precision", "Recall", "Precision@k", "Recall@k", "MSE"])  # Write header
-
 
 for i in range(30):
     if (i % 3 == 0):
@@ -302,9 +302,6 @@ for i in range(30):
         train_indices, val_indices = train_test_split(train_indices, train_size=0.8, test_size=0.2, random_state=42)
         np.savez('indices.npz', train_indices=train_indices, test_indices=test_indices, val_indices=val_indices)
 
-    # Now, you can comment out the above code that generates the indices
-
-    # Read the indices from the file
     loaded_indices = np.load('indices.npz')
     train_indices = loaded_indices['train_indices']
     test_indices = loaded_indices['test_indices']
@@ -315,211 +312,160 @@ for i in range(30):
     test_data = data.__class__()
     val_data = data.__class__()
 
-
     #setzt die Parameter von train_data und test_data
-
     #soweit ich es verstehe, sind alle 2.500 nodes im training und testset vorhanden. gesplittet werden nur die edges, d.h. 
     #es ist nur ein subset der 100.000 edges im training set sowie im test set vorhanden
     # also 10% der Bewertungen 
     train_data.edge_index = data.edge_index[:, train_indices]
-    train_data.y = data.y[train_indices]
+    train_data.y = rating_tensor[train_indices] #muss so sein, weil indicies sich auf original tensor beziehen!
     train_data.num_nodes = data.num_nodes
     train_data.positional_encodings = data.positional_encodings
     train_data.x = data.x
-
+    train_data.edge_attr = data.edge_attr[train_indices]
 
     test_data.edge_index = data.edge_index[:, test_indices]
-    test_data.y = data.y[test_indices]
+    test_data.y = rating_tensor[test_indices]
     test_data.num_nodes = data.num_nodes
     test_data.positional_encodings = data.positional_encodings
     test_data.x = data.x
+    test_data.edge_attr = data.edge_attr[test_indices]
 
 
     val_data.edge_index = data.edge_index[:, val_indices]
-    val_data.y = data.y[val_indices]
+    val_data.y = rating_tensor[val_indices]
     val_data.num_nodes = data.num_nodes
     val_data.positional_encodings = data.positional_encodings
     val_data.x = data.x
+    val_data.edge_attr = data.edge_attr[val_indices]
 
 
 
-    class GINModel_nopos(nn.Module):
+
+
+    class GATModel_nopos(nn.Module):
         def __init__(self, hidden_channels):
-            super(GINModel_nopos, self).__init__()
-            # number of in layers = number of node features + number of positional embedding dimensions
-            num_features = 19
-            self.conv1 = GINConv(nn.Sequential(
-                nn.Linear(num_features, hidden_channels),
-                nn.ReLU(),
-                nn.Linear(hidden_channels, hidden_channels),
-            ))
-            self.conv2 = GINConv(nn.Sequential(
-                nn.Linear(hidden_channels, hidden_channels),
-                nn.ReLU(),
-                nn.Linear(hidden_channels, hidden_channels) #TODO: diesen Parameter mal tunen! 
-            ))
+            super(GATModel_nopos, self).__init__()
 
-            self.conv3 = GINConv(nn.Sequential(
-                nn.Linear(hidden_channels, hidden_channels),
-                nn.ReLU(),
-                nn.Linear(hidden_channels, 1) #TODO: diesen Parameter mal tunen! 
-            ))
-
-        def forward(self, x, edge_index, pos_embeddings):
-            x = x.view(-1, x.size(2))
-
-            #fh from the paper
-            x = self.conv1(x, edge_index)
-            #x = F.relu(x)
-            #x = self.conv2(x, edge_index)
-          #  x = F.relu(x)
-          #  x = self.conv3(x, edge_index)
-
-            # Predict movie ratings (edge features) using a linear layer
-            user_embed = x[edge_index[0]]
-            movie_embed = x[edge_index[1]]
-            
-        # ratings = torch.sum(user_embed * movie_embed, dim=1)
-            ratings = torch.sum(movie_embed, dim=1)
-            return ratings
-
-
-    class GINModel_var1(nn.Module):
-        def __init__(self, hidden_channels):
-            super(GINModel_var1, self).__init__()
             # number of in layers = number of node features + number of positional embedding dimensions
             num_features = 24
-            self.conv1 = GINConv(nn.Sequential(
-                nn.Linear(num_features, hidden_channels),
-                nn.ReLU(),
-                nn.Linear(hidden_channels, hidden_channels),
-            ))
-            self.conv2 = GINConv(nn.Sequential(
-                nn.Linear(hidden_channels, hidden_channels),
-                nn.ReLU(),
-                nn.Linear(hidden_channels, hidden_channels)  
-            ))
+            self.conv1 = GATv2Conv(num_features, hidden_channels, 1, edge_dim=1)
+            self.conv1_nopos = GATv2Conv(19, hidden_channels, 1, edge_dim=1)
 
-            self.conv3 = GINConv(nn.Sequential(
-                nn.Linear(hidden_channels, hidden_channels),
-                nn.ReLU(),
-                nn.Linear(hidden_channels, hidden_channels) 
-            ))
-
+            self.conv2 = GATv2Conv(hidden_channels, hidden_channels, 1)
+            self.conv2_var2 = GATv2Conv(hidden_channels*2, hidden_channels, 1)
+            self.conv3 = GATv2Conv(hidden_channels, 1, 1)
+    
             #this is for learning of the positional encodings, which is seperate!!!
-            self.conv1_pos = GINConv(nn.Sequential(
-                nn.Linear(5, hidden_channels),
-                nn.ReLU(),
-                nn.Linear(hidden_channels, hidden_channels),
-            ))
-            self.conv2_pos = GINConv(nn.Sequential(
-                nn.Linear(hidden_channels, hidden_channels),
-                nn.ReLU(),
-                nn.Linear(hidden_channels, hidden_channels), 
-            ))
-            self.conv3_pos = GINConv(nn.Sequential(
-                nn.Linear(hidden_channels, hidden_channels),
-                nn.ReLU(),
-                nn.Linear(hidden_channels, hidden_channels) 
-            ))
-            self.linear = nn.Linear(hidden_channels, 1)
+            self.conv1_pos = GATv2Conv(5, hidden_channels, 1)
+            self.conv2_pos = GATv2Conv(hidden_channels, 1, 1)
 
-
-
-        def forward(self, x, edge_index, pos_embeddings):
+        def forward(self, x, edge_index, pos_embeddings, edge_attr):
             x = x.view(-1, x.size(2))
-            pos_embeddings = pos_embeddings.view(-1, pos_embeddings.size(2))
+            #pos_embeddings = pos_embeddings.view(-1, pos_embeddings.size(2))        
+            #x = torch.cat([x, pos_embeddings], dim=1)
+
+            #fh from the paper
+            #eigentlich müsste man die edge features direkt reinfüttern können: so         x = self.conv1(x, edge_index,edge_attr=edge_attr)
+            x = self.conv1_nopos(x, edge_index, edge_attr = edge_attr) #, # edge_attr = edge_attr)
+            x = F.relu(x)
+            x = self.conv2(x, edge_index)
+
+            #these are the user features (right now: none)
+            user_embed = x[edge_index[0]]
+            #these are the movie features
+            movie_embed = x[edge_index[1]]
+
+            #ratings = torch.sum(user_embed * movie_embed, dim=1)
+            ratings = torch.sum(movie_embed, dim=1)
+            return ratings, pos_embeddings
+
+
+    class GATModel_variant1(nn.Module):
+        def __init__(self, hidden_channels):
+            super(GATModel_variant1, self).__init__()
+
+            # number of in layers = number of node features + number of positional embedding dimensions
+            num_features = 24
+            self.conv1 = GATv2Conv(num_features, hidden_channels, 1, edge_dim=1)
+            self.conv2 = GATv2Conv(hidden_channels, hidden_channels, 1)
+            self.conv3 = GATv2Conv(hidden_channels, hidden_channels, 1)
+    
+            #this is for learning of the positional encodings, which is seperate!!!
+            self.conv1_pos = GATv2Conv(5, hidden_channels, 1)
+            self.conv2_pos = GATv2Conv(hidden_channels, hidden_channels, 1)
+            self.conv3_pos = GATv2Conv(hidden_channels, hidden_channels,1)
+            self.linear = nn.Linear(hidden_channels, 1)
+            
+
+        def forward(self, x, edge_index, pos_embeddings, edge_attr):
+            x = x.view(-1, x.size(2))
+            pos_embeddings = pos_embeddings.view(-1, pos_embeddings.size(2))      
             x = torch.cat([x, pos_embeddings], dim=1)
 
             #fh from the paper
-            x = self.conv1(x, edge_index)
-           # x = F.relu(x)
-           
-           # x = self.conv2(x, edge_index)
-           # x = F.relu(x)
-           # x = self.conv3(x, edge_index)
+            #eigentlich müsste man die edge features direkt reinfüttern können: so         x = self.conv1(x, edge_index,edge_attr=edge_attr)
+            x = self.conv1(x, edge_index, edge_attr = edge_attr) #, # edge_attr = edge_attr)
+            x = F.relu(x)
+            x = self.conv2(x, edge_index)
+            x = F.relu(x)
+            x = self.conv3(x, edge_index)
 
             #Now the learning of positional embeddings. So this is fp from the paper
             pos_embeddings = self.conv1_pos(pos_embeddings, edge_index)
-           # pos_embeddings = F.relu(pos_embeddings)
-           # pos_embeddings = self.conv2_pos(pos_embeddings, edge_index)
-           # pos_embeddings = F.relu(pos_embeddings)
-           # pos_embeddings = self.conv3_pos(pos_embeddings, edge_index)
+            pos_embeddings = F.relu(pos_embeddings)
+            pos_embeddings = self.conv2_pos(pos_embeddings, edge_index)
+            pos_embeddings = F.relu(pos_embeddings)
+            pos_embeddings = self.conv3_pos(pos_embeddings, edge_index)
 
             final_output = self.linear(torch.cat([x, pos_embeddings]))
-            movie_embed = final_output[edge_index[1]]
+            #these are the movie features
+            movie_embed = final_output[edge_index[1]]            
+
+            #ratings = torch.sum(user_embed * movie_embed, dim=1)
             ratings = torch.sum(movie_embed, dim=1)
+            return ratings, pos_embeddings
 
-            return ratings
 
-    '''____________________________________________________________________________________'''
 
-    class GINModel_var2(nn.Module):
+    class GATModel_variant2(nn.Module):
         def __init__(self, hidden_channels):
-            super(GINModel_var2, self).__init__()
+            super(GATModel_variant2, self).__init__()
+
             # number of in layers = number of node features + number of positional embedding dimensions
-            num_features = 19
-            self.conv1 = GINConv(nn.Sequential(
-                nn.Linear(num_features, hidden_channels),
-               # nn.ReLU(),
-               # nn.Linear(hidden_channels, hidden_channels),
-            ))
-            self.conv2 = GINConv(nn.Sequential(
-                nn.Linear(hidden_channels, hidden_channels),
-                nn.ReLU(),
-                nn.Linear(hidden_channels, hidden_channels)  
-            ))
-            self.conv2_var2 = GINConv (nn.Sequential(
-                nn.Linear(hidden_channels*2, hidden_channels*2),
-           #     nn.ReLU(),
-            #    nn.Linear(hidden_channels, hidden_channels)  
-            ))
-
-            self.conv3 = GINConv(nn.Sequential(
-                nn.Linear(hidden_channels, hidden_channels),
-                nn.ReLU(),
-                nn.Linear(hidden_channels, hidden_channels) 
-            ))
-
+            num_features = 24
+            self.conv1 = GATv2Conv(num_features, hidden_channels, 1, edge_dim=1)
+            self.conv1_nopos = GATv2Conv(19, hidden_channels, 1, edge_dim=1)
+            self.conv2 = GATv2Conv(hidden_channels, hidden_channels, 1)
+            self.conv2_var2 = GATv2Conv(hidden_channels*2, hidden_channels, 1)
+            self.conv3 = GATv2Conv(hidden_channels, hidden_channels, 1)
+    
             #this is for learning of the positional encodings, which is seperate!!!
-            self.conv1_pos = GINConv(nn.Sequential(
-                nn.Linear(5, hidden_channels),
-             #   nn.ReLU(),
-              #  nn.Linear(hidden_channels, hidden_channels),
-            ))
-            self.conv2_pos = GINConv(nn.Sequential(
-                nn.Linear(hidden_channels, hidden_channels),
-                nn.ReLU(),
-                nn.Linear(hidden_channels, hidden_channels), 
-            ))
-            self.conv3_pos = GINConv(nn.Sequential(
-                nn.Linear(hidden_channels, hidden_channels),
-                nn.ReLU(),
-                nn.Linear(hidden_channels, hidden_channels) 
-            ))
-            self.linear = nn.Linear(hidden_channels, 1)
+            self.conv1_pos = GATv2Conv(5, hidden_channels, 1)
+            self.conv2_pos = GATv2Conv(hidden_channels, hidden_channels, 1)
+            self.conv3_pos = GATv2Conv(hidden_channels, hidden_channels, 1)
 
+            
 
-
-        def forward(self, x, edge_index, pos_embeddings):
+        def forward(self, x, edge_index, pos_embeddings, edge_attr):
             x = x.view(-1, x.size(2))
-            pos_embeddings = pos_embeddings.view(-1, pos_embeddings.size(2))
-           # x = torch.cat([x, pos_embeddings], dim=1)
+            pos_embeddings = pos_embeddings.view(-1, pos_embeddings.size(2))        
+            x = torch.cat([x, pos_embeddings], dim=1)
 
             #fh from the paper
-            x = self.conv1(x, edge_index)
+            #eigentlich müsste man die edge features direkt reinfüttern können: so         x = self.conv1(x, edge_index,edge_attr=edge_attr)
+            x = self.conv1(x, edge_index,  edge_attr = edge_attr)
             x = F.relu(x)
             pos_embeddings = self.conv1_pos(pos_embeddings, edge_index)
             pos_embeddings = F.relu(pos_embeddings)
-
+            #x = self.conv2(torch.cat([x,pos_embeddings],dim=1), edge_index)
             x = self.conv2_var2(torch.cat([x,pos_embeddings],dim=1), edge_index)
-           # x = F.relu(x)
-            #x = self.conv3(x, edge_index)
+            x = F.relu(x)
+            x = self.conv3(x, edge_index)
 
             movie_embed = x[edge_index[1]]
             ratings = torch.sum(movie_embed, dim=1)
 
-            return ratings
+            return ratings, pos_embeddings
 
 
 
@@ -532,31 +478,30 @@ for i in range(30):
     #------------------------------------------------------
 
     #hidden channels und epochs tunen
-    hidden_channels= 128 #war 256
+    hidden_channels= 256 #war 256
     lr = 0.01  #0.01 vs 0.001 
     epochs = 150  #100 vs 200
-    batch_size = 512
+    batch_size = 512#512
 
     #1, 16, 32 ,64, 128, 256, 512
 
     #Early Stopping
-    patience = 150  # Number of epochs to wait for improvement
+    patience = 30  # Number of epochs to wait for improvement
     min_delta = 0.001  # Minimum improvement required to consider as improvement
 
     best_val_loss = np.inf
     best_epoch = 0
     early_stop_counter = 0
 
-    # Define the GCNModel
-    #model = GATModel(num_features = 1, hidden_channels = hidden_channels, num_classes = 1, heads = 1).to(device)
-    #model = GINModel(num_features = 1, num_classes = 1).to(device)
-
     if (i % 3 == 0):
-        model = GINModel_nopos(hidden_channels=hidden_channels)
+        model = GATModel_nopos(hidden_channels=hidden_channels)
     elif (i % 3 == 1):
-        model = GINModel_var1(hidden_channels=hidden_channels)
+        model = GATModel_variant1(hidden_channels=hidden_channels)
     elif (i%3 == 2):
-        model = GINModel_var2(hidden_channels=hidden_channels)
+        model = GATModel_variant2(hidden_channels=hidden_channels)
+
+
+    #------------------------------------------------------
     #------------------------------------------------------
     #loss function, and optimizer, MSE = Metrik für Loss 
     criterion = nn.MSELoss()
@@ -582,9 +527,8 @@ for i in range(30):
         train_loss = 0.0
         
         for batch in train_loader:
-            batch = batch.to(device)
-            
-            out = model( batch.x.unsqueeze(1), batch.edge_index, batch.positional_encodings.unsqueeze(1))
+            batch = batch.to(device)        
+            out, batch.positional_encodings = model( batch.x.unsqueeze(1), batch.edge_index, batch.positional_encodings.unsqueeze(1), batch.edge_attr.unsqueeze(1))
             task_loss = criterion(out, batch.y)
             loss = task_loss
             #loss = calculateLoss(task_loss, batch, num_nodes, batch.positional_encodings)
@@ -605,7 +549,7 @@ for i in range(30):
         val_loss = 0.0
         for batch in val_loader:
             batch = batch.to(device)
-            out=  model(batch.x.unsqueeze(1),batch.edge_index, batch.positional_encodings.unsqueeze(1))
+            out, batch.positional_encodings = model(batch.x.unsqueeze(1),batch.edge_index, batch.positional_encodings.unsqueeze(1), batch.edge_attr.unsqueeze(1))
             task_loss = criterion(out, batch.y)
             loss = task_loss
             #loss = calculateLoss(task_loss, batch, num_nodes, batch.positional_encodings)
@@ -654,7 +598,7 @@ for i in range(30):
 
         for batch in test_loader:
             batch = batch.to(device)
-            out = model(batch.x.unsqueeze(1), batch.edge_index, batch.positional_encodings.unsqueeze(1))
+            out, batch.positional_encodings = model(batch.x.unsqueeze(1), batch.edge_index, batch.positional_encodings.unsqueeze(1), batch.y.unsqueeze(1))
             task_loss = criterion(out, batch.y)
             test_loss = task_loss
             #test_loss = calculateLoss(task_loss, batch, num_nodes, batch.positional_encodings)
@@ -680,7 +624,7 @@ for i in range(30):
 
         mse = np.mean(np.abs(predictions - targets) ** 2)
         rmse = np.sqrt(mse)
-        k = 5  # Define the value of k
+        k = 10  # Define the value of k
 
         print(f"Batch Size: {batch_size}")
         print(f"Epochs: {epochs}")
@@ -694,11 +638,13 @@ for i in range(30):
         #print(predictions)
 
         GAT_results = open("predictions_GAT.txt", "a")
-        GAT_results.write(str(predictions))      
+        GAT_results.write(str(predictions))
         GAT_results.close()
 
         precision_value = precision(predictions, targets, threshold)
         recall_value = recall(predictions, targets, threshold)
+
+        precission_k, recall_k, normalized_recall_k = precission_recall_at_k(predictions, targets, 4, 50)
 
         with open("predictions.txt", 'w') as file:
             for prediction in predictions:
@@ -706,21 +652,23 @@ for i in range(30):
 
         print(f"Precision: {precision_value}")
         print(f"Recall: {recall_value}")
-        precission_k, recall_k, normalized_recall_k = precission_recall_at_k(predictions, targets, 4, 1000)
 
-        print(f"Precision_at_k: {precission_k}")
-        print(f"Recall_at_k: {recall_k}")
+        print(f"Precision@k: {precission_k}")
+        print(f"Recall@k: {recall_k}")
 
-        #Now write the file! 
-        if (i % 3== 0):
-            model_name = "GIN_nopos"
-        elif (i %3 == 1):
-            model_name = "GIN_var1"
+         #Now write the file! 
+        if (i % 3 == 0):
+            model_name = "GAN_nopos"
+        elif (i % 3 == 1):
+            model_name = "GAN_var1"
         elif (i%3 == 2):
-            model_name = "GIN_var2"
+            model_name = "GAN_variant2"
 
 
-        with open("results_GIN.csv", mode='a', newline='') as csv_file:
+        with open(csv_filename, mode='a', newline='') as csv_file:
             csv_writer = csv.writer(csv_file)
             csv_writer.writerow([i, model_name, precision_value, recall_value, precission_k, recall_k, mse])
+
+
+
 
