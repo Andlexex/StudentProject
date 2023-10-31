@@ -212,6 +212,7 @@ def precission_recall_at_k(predictions, targets, threshold, k):
     return precision_at_k, recall_at_k, normalized_recall_at_k
 
 
+# calculate the vector of each review
 def get_review_vector(tokens, model):
     word_vectors = model.wv
     vectors = []
@@ -230,11 +231,12 @@ def get_review_vector(tokens, model):
     return average_vector
 
 
+#  generate the W2Vec model and train it
 def generateModel(df):
-    print("generate model")
     current_directory = os.getcwd()
     model_path = os.path.join(
         current_directory, "product_reviews_word2vec.model")
+    print("generate model")
     if not os.path.exists(model_path):
         # check if the reviewText type is not string and convert them
 
@@ -258,11 +260,9 @@ def generateModel(df):
         return model_path
 
 
-graph_path = os.path.expanduser(
-    "~/Uni/Semester_6/Forschungsprojekt/amazon/bin/graph.pth")
-
 # process the data from the dataset
 # read the json and prepare the required data
+# the json file must be in amazon directory
 parent_directory = os.path.dirname(os.getcwd())
 data_path = os.path.join(
     parent_directory, "AMAZON_FASHION.json.gz")
@@ -295,11 +295,9 @@ df["asin_id"] = df["asin"].map(asin_to_id)
 model_path = generateModel(df)
 model_word2Vec = Word2Vec.load(model_path)
 
-# dummy padding for the reviewer
-# compute word vectors for the products
 processed_reviews = []
+
 # compute for each product the average word vector
-print("compute the word vectors")
 for asin_id, group in df.groupby("asin_id")["tokenized_review"]:
     vector_for_product = []
 
@@ -318,6 +316,7 @@ for asin_id, group in df.groupby("asin_id")["tokenized_review"]:
         processed_reviews.append(
             {"asin_id": asin_id, "product_vector": np.zeros(100)})
 
+# get the average vector from the reviews
 product_reviews = pd.DataFrame(processed_reviews)
 product_vector = product_reviews['product_vector']
 num_features = len(product_vector[0])
@@ -325,21 +324,19 @@ num_features = len(product_vector[0])
 edges = df[["reviewerID_id", "asin_id"]].values.T
 edge_attr = df["overall"].values
 
+# dummy padding for the reviewer
 reviewerID_features = torch.zeros(len(unique_reviewers), num_features)
 product_feature = torch.tensor(product_vector, dtype=torch.float)
-
 features = torch.cat((product_feature, reviewerID_features), dim=0)
 
+# delete the product review Dataframe because we dont need it anymore
 del product_reviews
 
-print(features)
-
-# Extract user and product nodes
-user_product = torch.tensor(
-    df[["reviewerID_id", "asin_id"]].values, dtype=torch.float)
-
-# Extract edge indices
+# generate udirected edges
 edge_index = torch.tensor(edges, dtype=torch.long)
+reverse_edges = edges[::-1].copy()
+edge_index_ud = torch.cat(
+    [edge_index, torch.tensor(reverse_edges, dtype=torch.long)], dim=1)
 
 # num nodes 30.000 oder num_nodes?
 positional_encodings = calculatePosEncodings_rswe(edge_index, num_nodes)
@@ -348,9 +345,9 @@ positional_encodings = calculatePosEncodings_rswe(edge_index, num_nodes)
 rating_tensor = torch.tensor(edge_attr, dtype=torch.float)
 
 # Create the Data object with node features
-
 data = Data(edge_index=edge_index, x=features, y=rating_tensor,
             positional_encodings=positional_encodings)
+
 print("finish with the preprocessing")
 
 
@@ -468,8 +465,8 @@ class GCN_variant2(torch.nn.Module):
         return ratings
 
 
+data = torch.load("../../bin/graph.pth")
 indices = list(range(data.edge_index.size(1)))
-
 csv_filename = "results.csv"
 with open(csv_filename, mode='a', newline='') as csv_file:
     csv_writer = csv.writer(csv_file)

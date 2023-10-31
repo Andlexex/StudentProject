@@ -212,6 +212,7 @@ def precission_recall_at_k(predictions, targets, threshold, k):
     return precision_at_k, recall_at_k, normalized_recall_at_k
 
 
+# calculate the vector of each review
 def get_review_vector(tokens, model):
     word_vectors = model.wv
     vectors = []
@@ -230,6 +231,7 @@ def get_review_vector(tokens, model):
     return average_vector
 
 
+#  generate the W2Vec model and train it
 def generateModel(df):
     print("generate model")
     current_directory = os.getcwd()
@@ -260,7 +262,7 @@ def generateModel(df):
 
 # process the data from the dataset
 # read the json and prepare the required data
-
+# the json file must be in amazon directory
 parent_directory = os.path.dirname(os.getcwd())
 data_path = os.path.join(
     parent_directory, "AMAZON_FASHION.json.gz")
@@ -293,11 +295,10 @@ df["asin_id"] = df["asin"].map(asin_to_id)
 model_path = generateModel(df)
 model_word2Vec = Word2Vec.load(model_path)
 
-# dummy padding for the reviewer
-# compute word vectors for the products
+
 processed_reviews = []
+
 # compute for each product the average word vector
-print("compute the word vectors")
 for asin_id, group in df.groupby("asin_id")["tokenized_review"]:
     vector_for_product = []
 
@@ -316,6 +317,7 @@ for asin_id, group in df.groupby("asin_id")["tokenized_review"]:
         processed_reviews.append(
             {"asin_id": asin_id, "product_vector": np.zeros(100)})
 
+# get the average vector from the reviews
 product_reviews = pd.DataFrame(processed_reviews)
 product_vector = product_reviews['product_vector']
 num_features = len(product_vector[0])
@@ -323,115 +325,79 @@ num_features = len(product_vector[0])
 edges = df[["reviewerID_id", "asin_id"]].values.T
 edge_attr = df["overall"].values
 
+# dummy padding for the reviewer
+# crate tensor for the features
 reviewerID_features = torch.zeros(len(unique_reviewers), num_features)
 product_feature = torch.tensor(product_vector, dtype=torch.float)
-
 features = torch.cat((product_feature, reviewerID_features), dim=0)
 
+# delete the product review Dataframe because we dont need it anymore
 del product_reviews
 
-print(features)
-
-# Extract user and product nodes
-user_product = torch.tensor(
-    df[["reviewerID_id", "asin_id"]].values, dtype=torch.float)
-
-# Extract edge indices
+# extract edge indices
 edge_index = torch.tensor(edges, dtype=torch.long)
 
-# num nodes 30.000 oder num_nodes?
+# get the positional encodings
 positional_encodings = calculatePosEncodings_rswe(edge_index, num_nodes)
 
-# Extract edge attributes
+# extract edge attributes
 rating_tensor = torch.tensor(edge_attr, dtype=torch.float)
 
-# Create the Data object with node features
-
+# create the Data object with node features
 data = Data(edge_index=edge_index, x=features, y=rating_tensor,
             positional_encodings=positional_encodings)
+
 print("finish with the preprocessing")
 
 
-class GINModel_nopos(nn.Module):
+class GCN_nopos(torch.nn.Module):
     def __init__(self, hidden_channels):
-        super(GINModel_nopos, self).__init__()
-        # number of in layers = number of node features + number of positional embedding dimensions
-        num_features = 100
-        self.conv1 = GINConv(nn.Sequential(
-            nn.Linear(num_features, hidden_channels),
-            nn.ReLU(),
-            nn.Linear(hidden_channels, hidden_channels),
-        ))
-        self.conv2 = GINConv(nn.Sequential(
-            nn.Linear(hidden_channels, hidden_channels),
-            nn.ReLU(),
-            # TODO: diesen Parameter mal tunen!
-            nn.Linear(hidden_channels, hidden_channels)
-        ))
+        super().__init__()
+        self.conv1 = GCNConv(105, hidden_channels)
+        self.conv1_nopos = GCNConv(100, hidden_channels)
+        self.conv2 = GCNConv(hidden_channels, hidden_channels)
+        self.conv2_var2 = GCNConv(hidden_channels*2, hidden_channels)
+        self.conv3 = GCNConv(hidden_channels, hidden_channels)
+        # hidden channels funktioniert besser!
+        self.conv3_nopos = GCNConv(hidden_channels, hidden_channels)
 
-        self.conv3 = GINConv(nn.Sequential(
-            nn.Linear(hidden_channels, hidden_channels),
-            nn.ReLU(),
-            nn.Linear(hidden_channels, 1)  # TODO: diesen Parameter mal tunen!
-        ))
+        # this is for learning of the positional encodings, which is seperate!!!
+        self.conv1_pos = GCNConv(5, hidden_channels)
+        self.conv2_pos = GCNConv(hidden_channels, hidden_channels)
+        self.conv3_pos = GCNConv(hidden_channels, hidden_channels)
+
+        self.linear = nn.Linear(hidden_channels, 1)
 
     def forward(self, x, edge_index, pos_embeddings):
         x = x.view(-1, x.size(2))
-
         # fh from the paper
-        x = self.conv1(x, edge_index)
-        # x = F.relu(x)
-        # x = self.conv2(x, edge_index)
-      #  x = F.relu(x)
-      #  x = self.conv3(x, edge_index)
+        x = self.conv1_nopos(x, edge_index)
+        x = F.relu(x)
+        x = self.conv2(x, edge_index)
+        x = F.relu(x)
+        x = self.conv3_nopos(x, edge_index)
 
-        # Predict movie ratings (edge features) using a linear layer
-        reviewer_embed = x[edge_index[0]]
         product_embed = x[edge_index[1]]
 
-    # ratings = torch.sum(user_embed * movie_embed, dim=1)
         ratings = torch.sum(product_embed, dim=1)
+
         return ratings
 
 
-class GINModel_var1(nn.Module):
+class GCN_var1(torch.nn.Module):
     def __init__(self, hidden_channels):
-        super(GINModel_var1, self).__init__()
+        super().__init__()
         # number of in layers = number of node features + number of positional embedding dimensions
-        num_features = 105
-        self.conv1 = GINConv(nn.Sequential(
-            nn.Linear(num_features, hidden_channels),
-            nn.ReLU(),
-            nn.Linear(hidden_channels, hidden_channels),
-        ))
-        self.conv2 = GINConv(nn.Sequential(
-            nn.Linear(hidden_channels, hidden_channels),
-            nn.ReLU(),
-            nn.Linear(hidden_channels, hidden_channels)
-        ))
-
-        self.conv3 = GINConv(nn.Sequential(
-            nn.Linear(hidden_channels, hidden_channels),
-            nn.ReLU(),
-            nn.Linear(hidden_channels, hidden_channels)
-        ))
+        # TODO: ADAPT WHEN ADDING FEATURES OR EMBEDDING DIMENSIONS!!!!
+        self.conv1 = GCNConv(105, hidden_channels)
+        self.conv2 = GCNConv(hidden_channels, hidden_channels)
+        self.conv3 = GCNConv(hidden_channels, hidden_channels)
 
         # this is for learning of the positional encodings, which is seperate!!!
-        self.conv1_pos = GINConv(nn.Sequential(
-            nn.Linear(5, hidden_channels),
-            nn.ReLU(),
-            nn.Linear(hidden_channels, hidden_channels),
-        ))
-        self.conv2_pos = GINConv(nn.Sequential(
-            nn.Linear(hidden_channels, hidden_channels),
-            nn.ReLU(),
-            nn.Linear(hidden_channels, hidden_channels),
-        ))
-        self.conv3_pos = GINConv(nn.Sequential(
-            nn.Linear(hidden_channels, hidden_channels),
-            nn.ReLU(),
-            nn.Linear(hidden_channels, hidden_channels)
-        ))
+        self.conv1_pos = GCNConv(5, hidden_channels)
+        self.conv2_pos = GCNConv(hidden_channels, hidden_channels)
+        self.conv3_pos = GCNConv(hidden_channels, hidden_channels)
+
         self.linear = nn.Linear(hidden_channels, 1)
 
     def forward(self, x, edge_index, pos_embeddings):
@@ -441,88 +407,56 @@ class GINModel_var1(nn.Module):
 
         # fh from the paper
         x = self.conv1(x, edge_index)
-       # x = F.relu(x)
-
-       # x = self.conv2(x, edge_index)
-       # x = F.relu(x)
-       # x = self.conv3(x, edge_index)
+        x = F.relu(x)
+        x = self.conv2(x, edge_index)
+        x = F.relu(x)
+        x = self.conv3(x, edge_index)
 
         # Now the learning of positional embeddings. So this is fp from the paper
         pos_embeddings = self.conv1_pos(pos_embeddings, edge_index)
-       # pos_embeddings = F.relu(pos_embeddings)
-       # pos_embeddings = self.conv2_pos(pos_embeddings, edge_index)
-       # pos_embeddings = F.relu(pos_embeddings)
-       # pos_embeddings = self.conv3_pos(pos_embeddings, edge_index)
+        pos_embeddings = F.relu(pos_embeddings)
+        pos_embeddings = self.conv2_pos(pos_embeddings, edge_index)
+        pos_embeddings = F.relu(pos_embeddings)
+        pos_embeddings = self.conv3_pos(pos_embeddings, edge_index)
 
         final_output = self.linear(torch.cat([x, pos_embeddings]))
+
         product_embed = final_output[edge_index[1]]
         ratings = torch.sum(product_embed, dim=1)
-
         return ratings
 
 
-'''____________________________________________________________________________________'''
-
-
-class GINModel_var2(nn.Module):
+class GCN_variant2(torch.nn.Module):
     def __init__(self, hidden_channels):
-        super(GINModel_var2, self).__init__()
+        super().__init__()
         # number of in layers = number of node features + number of positional embedding dimensions
-        num_features = 100
-        self.conv1 = GINConv(nn.Sequential(
-            nn.Linear(num_features, hidden_channels),
-            # nn.ReLU(),
-            # nn.Linear(hidden_channels, hidden_channels),
-        ))
-        self.conv2 = GINConv(nn.Sequential(
-            nn.Linear(hidden_channels, hidden_channels),
-            nn.ReLU(),
-            nn.Linear(hidden_channels, hidden_channels)
-        ))
-        self.conv2_var2 = GINConv(nn.Sequential(
-            nn.Linear(hidden_channels*2, hidden_channels*2),
-            #     nn.ReLU(),
-            #    nn.Linear(hidden_channels, hidden_channels)
-        ))
-
-        self.conv3 = GINConv(nn.Sequential(
-            nn.Linear(hidden_channels, hidden_channels),
-            nn.ReLU(),
-            nn.Linear(hidden_channels, hidden_channels)
-        ))
+        # TODO: ADAPT WHEN ADDING FEATURES OR EMBEDDING DIMENSIONS!!!!
+        self.conv1 = GCNConv(105, hidden_channels)
+        self.conv2 = GCNConv(hidden_channels, hidden_channels)
+        self.conv2_var2 = GCNConv(hidden_channels*2, hidden_channels)
+        self.conv3 = GCNConv(hidden_channels, hidden_channels)
 
         # this is for learning of the positional encodings, which is seperate!!!
-        self.conv1_pos = GINConv(nn.Sequential(
-            nn.Linear(5, hidden_channels),
-            #   nn.ReLU(),
-            #  nn.Linear(hidden_channels, hidden_channels),
-        ))
-        self.conv2_pos = GINConv(nn.Sequential(
-            nn.Linear(hidden_channels, hidden_channels),
-            nn.ReLU(),
-            nn.Linear(hidden_channels, hidden_channels),
-        ))
-        self.conv3_pos = GINConv(nn.Sequential(
-            nn.Linear(hidden_channels, hidden_channels),
-            nn.ReLU(),
-            nn.Linear(hidden_channels, hidden_channels)
-        ))
+        self.conv1_pos = GCNConv(5, hidden_channels)
+        self.conv2_pos = GCNConv(hidden_channels, hidden_channels)
+        self.conv3_pos = GCNConv(hidden_channels, hidden_channels)
+
         self.linear = nn.Linear(hidden_channels, 1)
 
     def forward(self, x, edge_index, pos_embeddings):
         x = x.view(-1, x.size(2))
         pos_embeddings = pos_embeddings.view(-1, pos_embeddings.size(2))
-       # x = torch.cat([x, pos_embeddings], dim=1)
+        x = torch.cat([x, pos_embeddings], dim=1)
 
         # fh from the paper
         x = self.conv1(x, edge_index)
         x = F.relu(x)
         pos_embeddings = self.conv1_pos(pos_embeddings, edge_index)
         pos_embeddings = F.relu(pos_embeddings)
-
+        # x = self.conv2(torch.cat([x,pos_embeddings],dim=1), edge_index)
         x = self.conv2_var2(torch.cat([x, pos_embeddings], dim=1), edge_index)
-       # x = F.relu(x)
-        # x = self.conv3(x, edge_index)
+        x = F.relu(x)
+        x = self.conv3(x, edge_index)
 
         product_embed = x[edge_index[1]]
         ratings = torch.sum(product_embed, dim=1)
@@ -530,9 +464,7 @@ class GINModel_var2(nn.Module):
         return ratings
 
 
-data = torch.load("../bin/graph.pth")
 indices = list(range(data.edge_index.size(1)))
-
 
 csv_filename = "results.csv"
 with open(csv_filename, mode='a', newline='') as csv_file:
@@ -542,7 +474,6 @@ with open(csv_filename, mode='a', newline='') as csv_file:
 
 
 for i in range(30):
-    # das hier klein, damit der Speicher nicht überdreht wird. Aber nicht zu klein, weil sonst kommt es zu problemen!
     if (i % 3 == 0):
         train_indices, test_indices = train_test_split(
             indices, train_size=0.8, test_size=0.2)
@@ -550,19 +481,19 @@ for i in range(30):
             train_indices, train_size=0.8, test_size=0.2, random_state=42)
         np.savez('indices.npz', train_indices=train_indices,
                  test_indices=test_indices, val_indices=val_indices)
-    # Now, you can comment out the above code that generates the indices
-    # Read the indices from the file
+
+    # read the indices from the file
     loaded_indices = np.load('indices.npz')
-    # irgendeine syntax
+    train_indices = loaded_indices['train_indices']
+    test_indices = loaded_indices['test_indices']
+    val_indices = loaded_indices['val_indices']
+
+    # some syntax
     train_data = data.__class__()
     test_data = data.__class__()
     val_data = data.__class__()
 
-    # setzt die Parameter von train_data und test_data
-
-    # soweit ich es verstehe, sind alle 2.500 nodes im training und testset vorhanden. gesplittet werden nur die edges, d.h.
-    # es ist nur ein subset der 100.000 edges im training set sowie im test set vorhanden
-    # also 10% der Bewertungen
+    # set up the parameters for train_data und test_data
     train_data.edge_index = data.edge_index[:, train_indices]
     train_data.y = data.y[train_indices]
     train_data.num_nodes = data.num_nodes
@@ -590,10 +521,10 @@ for i in range(30):
     # ------------------------------------------------------
 
     # hidden channels und epochs tunen
-    hidden_channels = 16  # 8 und 16
+    hidden_channels = 8  # 8 und 16
     lr = 0.01  # 0.01 vs 0.001
-    epochs = 200  # 100 vs 200
-    batch_size = 512  # 512
+    epochs = 100  # 100 vs 200
+    batch_size = 64  # 512
 
     # 1, 16, 32 ,64, 128, 256, 512
 
@@ -607,11 +538,11 @@ for i in range(30):
 
     # this is for evaluation!
     if (i % 3 == 0):
-        model = GINModel_nopos(hidden_channels=hidden_channels)
+        model = GCN_nopos(hidden_channels=hidden_channels)
     elif (i % 3 == 1):
-        model = GINModel_var1(hidden_channels=hidden_channels)
+        model = GCN_var1(hidden_channels=hidden_channels)
     elif (i % 3 == 2):
-        model = GINModel_var2(hidden_channels=hidden_channels)
+        model = GCN_variant2(hidden_channels=hidden_channels)
 
     model = model.to(device)  # Move the model to the selected device
 
@@ -638,9 +569,9 @@ for i in range(30):
     for epoch in range(epochs):
         # Training
         train_loss = 0.0
-
         for batch in train_loader:
             batch = batch.to(device)
+            print("hier")
             out = model(batch.x.unsqueeze(1), batch.edge_index,
                         batch.positional_encodings.unsqueeze(1))
             task_loss = criterion(out, batch.y)

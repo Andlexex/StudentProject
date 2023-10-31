@@ -212,6 +212,7 @@ def precission_recall_at_k(predictions, targets, threshold, k):
     return precision_at_k, recall_at_k, normalized_recall_at_k
 
 
+# calculate the vector of each review
 def get_review_vector(tokens, model):
     word_vectors = model.wv
     vectors = []
@@ -230,6 +231,7 @@ def get_review_vector(tokens, model):
     return average_vector
 
 
+#  generate the W2Vec model and train it
 def generateModel(df):
     print("generate model")
     current_directory = os.getcwd()
@@ -260,6 +262,7 @@ def generateModel(df):
 
 # process the data from the dataset
 # read the json and prepare the required data
+# the json file must be in amazon directory
 parent_directory = os.path.dirname(os.getcwd())
 data_path = os.path.join(
     parent_directory, "AMAZON_FASHION.json.gz")
@@ -275,6 +278,7 @@ df["tokenized_review"] = df["reviewText"].apply(
     lambda x: word_tokenize(x.lower()))
 
 tokenized_reviews = df["tokenized_review"].tolist()
+
 
 # get unique indicies
 unique_reviewers = df["reviewerID"].unique()
@@ -292,11 +296,10 @@ df["asin_id"] = df["asin"].map(asin_to_id)
 model_path = generateModel(df)
 model_word2Vec = Word2Vec.load(model_path)
 
-# dummy padding for the reviewer
 # compute word vectors for the products
 processed_reviews = []
+
 # compute for each product the average word vector
-print("compute the word vectors")
 for asin_id, group in df.groupby("asin_id")["tokenized_review"]:
     vector_for_product = []
 
@@ -316,73 +319,41 @@ for asin_id, group in df.groupby("asin_id")["tokenized_review"]:
             {"asin_id": asin_id, "product_vector": np.zeros(100)})
 
 product_reviews = pd.DataFrame(processed_reviews)
+
+# Generate random numbers for each product review vector
+random_numbers = np.random.rand(100)
+product_reviews['product_vector'] = product_reviews['product_vector'].apply(
+    lambda vector: [x + random_numbers[i] for i, x in enumerate(vector)]
+)
+# get the average vector from the reviews
 product_vector = product_reviews['product_vector']
+
 num_features = len(product_vector[0])
+
 
 edges = df[["reviewerID_id", "asin_id"]].values.T
 edge_attr = df["overall"].values
+edge_index = torch.tensor(edges, dtype=torch.long)
 
+# dummy padding for the reviewer
+# crate tensor for the features
 reviewerID_features = torch.zeros(len(unique_reviewers), num_features)
 product_feature = torch.tensor(product_vector, dtype=torch.float)
-
 features = torch.cat((product_feature, reviewerID_features), dim=0)
 
+# delete the product review Dataframe because we dont need it anymore
 del product_reviews
-
-print(features)
 
 # Extract edge indices
 edge_index = torch.tensor(edges, dtype=torch.long)
-
-# num nodes 30.000 oder num_nodes?
-positional_encodings = calculatePosEncodings_rswe(edge_index, num_nodes)
 
 # Extract edge attributes
 rating_tensor = torch.tensor(edge_attr, dtype=torch.float)
 
 # Create the Data object with node features
+data = Data(edge_index=edge_index, x=features, y=rating_tensor)
 
-data = Data(edge_index=edge_index, x=features, y=rating_tensor,
-            positional_encodings=positional_encodings)
 print("finish with the preprocessing")
-
-
-class GATModel_nopos(nn.Module):
-    def __init__(self, hidden_channels):
-        super(GATModel_nopos, self).__init__()
-
-        # number of in layers = number of node features + number of positional embedding dimensions
-        num_features = 105
-        self.conv1 = GATv2Conv(num_features, hidden_channels, 1, edge_dim=1)
-        self.conv1_nopos = GATv2Conv(100, hidden_channels, 1, edge_dim=1)
-
-        self.conv2 = GATv2Conv(hidden_channels, hidden_channels, 1)
-        self.conv2_var2 = GATv2Conv(hidden_channels*2, hidden_channels, 1)
-        self.conv3 = GATv2Conv(hidden_channels, 1, 1)
-
-        # this is for learning of the positional encodings, which is seperate!!!
-        self.conv1_pos = GATv2Conv(5, hidden_channels, 1)
-        self.conv2_pos = GATv2Conv(hidden_channels, 1, 1)
-
-    def forward(self, x, edge_index, pos_embeddings):
-        x = x.view(-1, x.size(2))
-        # pos_embeddings = pos_embeddings.view(-1, pos_embeddings.size(2))
-        # x = torch.cat([x, pos_embeddings], dim=1)
-
-        # fh from the paper
-        # eigentlich müsste man die edge features direkt reinfüttern können: so         x = self.conv1(x, edge_index,edge_attr=edge_attr)
-        x = self.conv1_nopos(x, edge_index)  # , # edge_attr = edge_attr)
-        x = F.relu(x)
-        x = self.conv2(x, edge_index)
-
-        # these are the user features (right now: none)
-        reviewer_embed = x[edge_index[0]]
-        # these are the movie features
-        product_embed = x[edge_index[1]]
-
-        # ratings = torch.sum(reviewer_embed * product_embed, dim=1)
-        ratings = torch.sum(product_embed, dim=1)
-        return ratings, pos_embeddings
 
 
 class GATModel_variant1(nn.Module):
@@ -390,21 +361,14 @@ class GATModel_variant1(nn.Module):
         super(GATModel_variant1, self).__init__()
 
         # number of in layers = number of node features + number of positional embedding dimensions
-        num_features = 105
+        num_features = 100
         self.conv1 = GATv2Conv(num_features, hidden_channels, 1, edge_dim=1)
         self.conv2 = GATv2Conv(hidden_channels, hidden_channels, 1)
         self.conv3 = GATv2Conv(hidden_channels, hidden_channels, 1)
-
-        # this is for learning of the positional encodings, which is seperate!!!
-        self.conv1_pos = GATv2Conv(5, hidden_channels, 1)
-        self.conv2_pos = GATv2Conv(hidden_channels, hidden_channels, 1)
-        self.conv3_pos = GATv2Conv(hidden_channels, hidden_channels, 1)
         self.linear = nn.Linear(hidden_channels, 1)
 
-    def forward(self, x, edge_index, pos_embeddings):
+    def forward(self, x, edge_index):
         x = x.view(-1, x.size(2))
-        pos_embeddings = pos_embeddings.view(-1, pos_embeddings.size(2))
-        x = torch.cat([x, pos_embeddings], dim=1)
 
         # fh from the paper
         # eigentlich müsste man die edge features direkt reinfüttern können: so         x = self.conv1(x, edge_index,edge_attr=edge_attr)
@@ -414,20 +378,14 @@ class GATModel_variant1(nn.Module):
         x = F.relu(x)
         x = self.conv3(x, edge_index)
 
-        # Now the learning of positional embeddings. So this is fp from the paper
-        pos_embeddings = self.conv1_pos(pos_embeddings, edge_index)
-        pos_embeddings = F.relu(pos_embeddings)
-        pos_embeddings = self.conv2_pos(pos_embeddings, edge_index)
-        pos_embeddings = F.relu(pos_embeddings)
-        pos_embeddings = self.conv3_pos(pos_embeddings, edge_index)
+        final_output = self.linear(x)
 
-        final_output = self.linear(torch.cat([x, pos_embeddings]))
         # these are the movie features
         product_embed = final_output[edge_index[1]]
 
         # ratings = torch.sum(user_embed * movie_embed, dim=1)
         ratings = torch.sum(product_embed, dim=1)
-        return ratings, pos_embeddings
+        return ratings
 
 
 class GATModel_variant2(nn.Module):
@@ -435,38 +393,28 @@ class GATModel_variant2(nn.Module):
         super(GATModel_variant2, self).__init__()
 
         # number of in layers = number of node features + number of positional embedding dimensGAT/indices.npz GAT/GAT_results.csv GAT/predictions_GAT.txt GAT/predicted_rankings.png GAT/predictions.txtions
-        num_features = 105
+        num_features = 100
         self.conv1 = GATv2Conv(num_features, hidden_channels, 1, edge_dim=1)
-        self.conv1_nopos = GATv2Conv(100, hidden_channels, 1, edge_dim=1)
         self.conv2 = GATv2Conv(hidden_channels, hidden_channels, 1)
-        self.conv2_var2 = GATv2Conv(hidden_channels*2, hidden_channels, 1)
+        self.conv2_var2 = GATv2Conv(hidden_channels, hidden_channels, 1)
         self.conv3 = GATv2Conv(hidden_channels, hidden_channels, 1)
 
-        # this is for learning of the positional encodings, which is seperate!!!
-        self.conv1_pos = GATv2Conv(5, hidden_channels, 1)
-        self.conv2_pos = GATv2Conv(hidden_channels, hidden_channels, 1)
-        self.conv3_pos = GATv2Conv(hidden_channels, hidden_channels, 1)
-
-    def forward(self, x, edge_index, pos_embeddings):
+    def forward(self, x, edge_index):
         x = x.view(-1, x.size(2))
-        pos_embeddings = pos_embeddings.view(-1, pos_embeddings.size(2))
-        x = torch.cat([x, pos_embeddings], dim=1)
-
         # fh from the paper
         # eigentlich müsste man die edge features direkt reinfüttern können: so         x = self.conv1(x, edge_index,edge_attr=edge_attr)
+
         x = self.conv1(x, edge_index)
         x = F.relu(x)
-        pos_embeddings = self.conv1_pos(pos_embeddings, edge_index)
-        pos_embeddings = F.relu(pos_embeddings)
         # x = self.conv2(torch.cat([x,pos_embeddings],dim=1), edge_index)
-        x = self.conv2_var2(torch.cat([x, pos_embeddings], dim=1), edge_index)
+        x = self.conv2_var2(x, edge_index)
         x = F.relu(x)
-        x = self.conv3(x, edge_index)
 
+        x = self.conv3(x, edge_index)
         product_embed = x[edge_index[1]]
         ratings = torch.sum(product_embed, dim=1)
 
-        return ratings, pos_embeddings
+        return ratings
 
 
 indices = list(range(data.edge_index.size(1)))
@@ -478,7 +426,8 @@ with open(csv_filename, mode='a', newline='') as csv_file:
                         "Precision@k", "Recall@k", "MSE"])  # Write header
 
 for i in range(30):
-    if (i % 3 == 0):
+    # das hier klein, damit der Speicher nicht überdreht wird. Aber nicht zu klein, weil sonst kommt es zu problemen!
+    if (i % 2 == 0):
         train_indices, test_indices = train_test_split(
             indices, train_size=0.8, test_size=0.2)
         train_indices, val_indices = train_test_split(
@@ -486,39 +435,26 @@ for i in range(30):
         np.savez('indices.npz', train_indices=train_indices,
                  test_indices=test_indices, val_indices=val_indices)
 
+    # Read the indices from the file
     loaded_indices = np.load('indices.npz')
-    train_indices = loaded_indices['train_indices']
-    test_indices = loaded_indices['test_indices']
-    val_indices = loaded_indices['val_indices']
 
-    # irgendeine syntax
+    # some syntax
     train_data = data.__class__()
     test_data = data.__class__()
     val_data = data.__class__()
 
-    # setzt die Parameter von train_data und test_data
-    # soweit ich es verstehe, sind alle 2.500 nodes im training und testset vorhanden. gesplittet werden nur die edges, d.h.
-    # es ist nur ein subset der 100.000 edges im training set sowie im test set vorhanden
-    # also 10% der Bewertungen
+    # set up the parameters for train_data und test_data
     train_data.edge_index = data.edge_index[:, train_indices]
-    # muss so sein, weil indicies sich auf original tensor beziehen!
-    train_data.y = rating_tensor[train_indices]
-    train_data.num_nodes = data.num_nodes
-    train_data.positional_encodings = data.positional_encodings
+    train_data.y = data.y[train_indices]
     train_data.x = data.x
 
     test_data.edge_index = data.edge_index[:, test_indices]
-    test_data.y = rating_tensor[test_indices]
-    test_data.num_nodes = data.num_nodes
-    test_data.positional_encodings = data.positional_encodings
+    test_data.y = data.y[test_indices]
     test_data.x = data.x
 
     val_data.edge_index = data.edge_index[:, val_indices]
-    val_data.y = rating_tensor[val_indices]
-    val_data.num_nodes = data.num_nodes
-    val_data.positional_encodings = data.positional_encodings
+    val_data.y = data.y[val_indices]
     val_data.x = data.x
-
     # Step 6: Train and evaluate the GCN model
     # Set seed for reproducibility
     torch.manual_seed(42)
@@ -544,11 +480,9 @@ for i in range(30):
     best_epoch = 0
     early_stop_counter = 0
 
-    if (i % 3 == 0):
-        model = GATModel_nopos(hidden_channels=hidden_channels)
-    elif (i % 3 == 1):
+    if (i % 2 == 0):
         model = GATModel_variant1(hidden_channels=hidden_channels)
-    elif (i % 3 == 2):
+    else:
         model = GATModel_variant2(hidden_channels=hidden_channels)
 
     model = model.to(device)  # Move the model to the selected device
@@ -580,57 +514,51 @@ for i in range(30):
 
         for batch in train_loader:
             batch = batch.to(device)
-            out, batch.positional_encodings = model(batch.x.unsqueeze(
-                1), batch.edge_index, batch.positional_encodings.unsqueeze(1))
+            out = model(batch.x.unsqueeze(1), batch.edge_index)
             task_loss = criterion(out, batch.y)
             loss = task_loss
-            # loss = calculateLoss(task_loss, batch, num_nodes, batch.positional_encodings)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             train_loss += loss.item() * batch.num_graphs
             predictions = out.detach().cpu().numpy()
-            # print(predictions)
 
-        # Calculate average training loss
-        train_loss /= len(train_loader.dataset)
-        train_losses.append(train_loss)
+            # Calculate average training loss
+            train_loss /= len(train_loader.dataset)
+            train_losses.append(train_loss)
 
-        # Validation
-        model.eval()
-        val_loss = 0.0
-        for batch in val_loader:
-            batch = batch.to(device)
-            out, batch.positional_encodings = model(batch.x.unsqueeze(
-                1), batch.edge_index, batch.positional_encodings.unsqueeze(1))
-            task_loss = criterion(out, batch.y)
-            loss = task_loss
-            # loss = calculateLoss(task_loss, batch, num_nodes, batch.positional_encodings)
+            # Validation
+            model.eval()
+            val_loss = 0.0
+            for batch in val_loader:
+                batch = batch.to(device)
+                out = model(batch.x.unsqueeze(1), batch.edge_index)
+                task_loss = criterion(out, batch.y)
+                loss = task_loss
+                val_loss += loss.item() * batch.num_graphs
 
-            val_loss += loss.item() * batch.num_graphs
+            # Calculate average validation loss
+            val_loss /= len(val_loader.dataset)
+            val_losses.append(val_loss)
 
-        # Calculate average validation loss
-        val_loss /= len(val_loader.dataset)
-        val_losses.append(val_loss)
+            # Print training and validation loss for monitoring
+            print(
+                f"Epoch {epoch+1}/{epochs}, Training Loss: {train_loss}, Validation Loss: {val_loss}")
 
-        # Print training and validation loss for monitoring
-        print(
-            f"Epoch {epoch+1}/{epochs}, Training Loss: {train_loss}, Validation Loss: {val_loss}")
+            # Check for early stopping
+            if val_loss < best_val_loss - min_delta:
+                best_val_loss = val_loss
+                best_epoch = epoch
+                early_stop_counter = 0
+            else:
+                early_stop_counter += 1
+                if early_stop_counter >= patience:
+                    print(f"Early stopping at epoch {epoch+1}")
+                    break
 
-        # Check for early stopping
-        if val_loss < best_val_loss - min_delta:
-            best_val_loss = val_loss
-            best_epoch = epoch
-            early_stop_counter = 0
-        else:
-            early_stop_counter += 1
-            if early_stop_counter >= patience:
-                print(f"Early stopping at epoch {epoch+1}")
-                break
-
-        # Set the model back to training mode
-        model.train()
+            # Set the model back to training mode
+            model.train()
     '''
     # Plotting training and validation curves
     plt.plot(train_losses, label='Training Loss')
@@ -653,8 +581,7 @@ for i in range(30):
 
         for batch in test_loader:
             batch = batch.to(device)
-            out, batch.positional_encodings = model(batch.x.unsqueeze(
-                1), batch.edge_index, batch.positional_encodings.unsqueeze(1))
+            out = model(batch.x.unsqueeze(1), batch.edge_index)
             task_loss = criterion(out, batch.y)
             test_loss = task_loss
             # test_loss = calculateLoss(task_loss, batch, num_nodes, batch.positional_encodings)
@@ -714,13 +641,10 @@ for i in range(30):
         print(f"Precision@k: {precission_k}")
         print(f"Recall@k: {recall_k}")
 
-        # Now write the file!
-        if (i % 3 == 0):
-            model_name = "GAN_nopos"
-        elif (i % 3 == 1):
+        if (i % 2 == 0):
             model_name = "GAN_var1"
-        elif (i % 3 == 2):
-            model_name = "GAN_variant2"
+        else:
+            model_name = "GAN_var2"
 
         with open(csv_filename, mode='a', newline='') as csv_file:
             csv_writer = csv.writer(csv_file)
