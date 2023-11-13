@@ -1,12 +1,4 @@
 
-'''
-TODO:
-1. Plot predictions, tune parameters (expecially 2 vs 3 layer)
-2. Implement pos encodings
-3 Result pos encodings
-
-Also, you could do this for 20m IF there is a straight-forward implementation of edge features
-'''
 
 import torch
 import torch.nn as nn
@@ -217,12 +209,9 @@ def calculateLoss(task_loss, batch, num_nodes, positional_encoding):
     pT = torch.transpose(p, 1, 0)
     loss_b_1 = torch.trace(torch.mm(torch.mm(pT, torch.Tensor(L.todense()).to(device)), p))
 
-    '''  TODO: loss_b_2 
-    '''
 
     loss_b = loss_b_1
 
-    #TODO: parameter tunen!
     loss = task_loss + 1e-3* loss_b
     return loss
 
@@ -293,7 +282,6 @@ edge_index = torch.tensor([user_index_col, movie_index_col], dtype=torch.long)
 # Set the number of nodes (users and movies)
 num_nodes = len(user_to_index) + len(movie_to_index)
 
-#####TOOOOOOOOODDDDDDDDDDDDDDDDOOOOOOOOOOOOOOOOOOOOOOOOOOO
 positional_encodings = calculatePosEncodings_rswe(edge_index, num_nodes)
 
 '''  HIER: ADD NODE FEATURES (they are CORRECT!)'''
@@ -331,7 +319,6 @@ data = Data(edge_index=edge_index,   x=all_genre_features, y=rating_tensor, num_
 # Step 4: Split the data into training and test sets
 indices = list(range(data.edge_index.size(1)))
 
-#das hier klein, damit der Speicher nicht überdreht wird. Aber nicht zu klein, weil sonst kommt es zu problemen!
 '''
 for loop: Each model 10 times. to ensure that the same train-test-split is used, we do a train test split first, then run model 1, 2 and 3
 After that, new train-test split, run model1, 2, 3 
@@ -351,7 +338,6 @@ for i in range(3):
         train_indices, val_indices = train_test_split(train_indices, train_size=0.8, test_size=0.2, random_state=42)
         np.savez('indices.npz', train_indices=train_indices, test_indices=test_indices, val_indices=val_indices)
 
-    # Now, you can comment out the above code that generates the indices
 
     # Read the indices from the file
     loaded_indices = np.load('indices.npz')
@@ -359,7 +345,6 @@ for i in range(3):
     test_indices = loaded_indices['test_indices']
     val_indices = loaded_indices['val_indices']
 
-    #irgendeine syntax
     train_data = data.__class__()
     test_data = data.__class__()
     val_data = data.__class__()
@@ -462,7 +447,7 @@ for i in range(3):
         def __init__(self, hidden_channels):
             super().__init__()
             # number of in layers = number of node features + number of positional embedding dimensions
-            # TODO: ADAPT WHEN ADDING FEATURES OR EMBEDDING DIMENSIONS!!!!
+
             self.conv1 = SAGEConv(24, hidden_channels, aggr='mean')
             self.conv2 = SAGEConv(hidden_channels, hidden_channels, aggr='mean')
             self.conv2_var2 = SAGEConv(hidden_channels*2, hidden_channels, aggr='mean')
