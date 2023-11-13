@@ -143,12 +143,10 @@ def calculateLoss(task_loss, batch, num_nodes, positional_encoding):
     pT = torch.transpose(p, 1, 0)
     loss_b_1 = torch.trace(torch.mm(torch.mm(pT, torch.Tensor(L.todense()).to(device)), p))
 
-    '''  TODO: loss_b_2 
-    '''
+    
 
     loss_b = loss_b_1
 
-    #TODO: parameter tunen!
     loss = task_loss + 1e-3* loss_b
     return loss
 
@@ -385,7 +383,6 @@ for i in range(30):
         def __init__(self, hidden_channels):
             super().__init__()
             # number of in layers = number of node features + number of positional embedding dimensions
-            # TODO: ADAPT WHEN ADDING FEATURES OR EMBEDDING DIMENSIONS!!!!
             self.conv1 = GCNConv(24, hidden_channels)
             self.conv2 = GCNConv(hidden_channels, hidden_channels)
             self.conv3 = GCNConv(hidden_channels, hidden_channels)
@@ -426,7 +423,6 @@ for i in range(30):
         def __init__(self, hidden_channels):
             super().__init__()
             # number of in layers = number of node features + number of positional embedding dimensions
-            # TODO: ADAPT WHEN ADDING FEATURES OR EMBEDDING DIMENSIONS!!!!
             self.conv1 = GCNConv(24, hidden_channels)
             self.conv2 = GCNConv(hidden_channels, hidden_channels)
             self.conv2_var2 = GCNConv(hidden_channels*2, hidden_channels)
