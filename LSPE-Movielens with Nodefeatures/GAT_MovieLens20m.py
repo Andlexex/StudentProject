@@ -142,12 +142,8 @@ def calculateLoss(task_loss, batch, num_nodes, positional_encoding):
     pT = torch.transpose(p, 1, 0)
     loss_b_1 = torch.trace(torch.mm(torch.mm(pT, torch.Tensor(L.todense()).to(device)), p))
 
-    '''  TODO: loss_b_2 
-    '''
-
     loss_b = loss_b_1
 
-    #TODO: parameter tunen!
     loss = task_loss + 1e-3* loss_b
     return loss
 
@@ -280,7 +276,6 @@ num_nodes = len(filtered_user_indices) + len(filtered_movie_indices)
 positional_encodings = calculatePosEncodings_rswe(edge_index, num_nodes)
 
 # Step 3: Read the u.item file to get the genre information
-#TODO: mismatch: x ist kürzer als num_nodes. num_nodes ist korrekt, also stimmt der Teil nicht
 
 genre_path = 'ml-20m/movies.csv'  # Set the path to the u.item file
 genre_df = pd.read_csv(genre_path, delimiter=',', encoding='latin-1', header=None)
@@ -312,11 +307,9 @@ user_genre_features = torch.zeros(num_users, num_genres)
 all_genre_features = torch.cat((movie_genre_features, user_genre_features), dim=0)
 '''
  
-print(len(all_genre_features)) #ist irgendwie falsch!! num nodes ist = len(positional_encodings)
-print(len(positional_encodings))
 
 
-''' TODO: die richtigen Positional encodings funktionieren noch nicht!!!!'''
+
 #positional_encodings= torch.rand(len(all_genre_features), 5) * 5
 
 # Create the data object for the entire dataset. IMPORTANT: this is not according to the documentation, because y are edge features here! 
