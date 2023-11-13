@@ -139,12 +139,9 @@ def calculateLoss(task_loss, batch, num_nodes, positional_encoding):
     pT = torch.transpose(p, 1, 0)
     loss_b_1 = torch.trace(torch.mm(torch.mm(pT, torch.Tensor(L.todense()).to(device)), p))
 
-    '''  TODO: loss_b_2 
-    '''
-
+ 
     loss_b = loss_b_1
 
-    #TODO: parameter tunen!
     loss = task_loss + 1e-3* loss_b
     return loss
 
